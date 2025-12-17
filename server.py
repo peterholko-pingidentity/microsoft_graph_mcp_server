@@ -3,6 +3,7 @@
 
 import os
 import json
+import logging
 from typing import Any
 from dotenv import load_dotenv
 from mcp.server import Server
@@ -11,6 +12,13 @@ from mcp.types import Tool, TextContent
 from starlette.middleware.cors import CORSMiddleware
 from msgraph import GraphServiceClient
 from azure.identity import ClientSecretCredential
+
+# Configure logging
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -148,15 +156,26 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
 
 
 # Starlette app for SSE transport
+logger.info("Initializing SseServerTransport with endpoint '/mcp'")
 sse_transport = SseServerTransport("/mcp")
+logger.info(f"Transport initialized: {sse_transport}")
 
 async def mcp_asgi_app(scope, receive, send):
     """Raw ASGI application for handling MCP connections."""
+    logger.info(f"========== NEW REQUEST ==========")
+    logger.info(f"Request type: {scope.get('type')}")
+    logger.info(f"Request method: {scope.get('method')}")
+    logger.info(f"Request path: {scope.get('path')}")
+    logger.info(f"Query string: {scope.get('query_string', b'').decode()}")
+    logger.info(f"Headers: {dict(scope.get('headers', []))}")
+
     if scope["type"] != "http":
+        logger.warning(f"Non-HTTP request type: {scope['type']}")
         return
 
     # Only handle /mcp path
     if scope["path"] != "/mcp":
+        logger.warning(f"Path mismatch: {scope['path']} != /mcp")
         await send({
             "type": "http.response.start",
             "status": 404,
@@ -169,17 +188,51 @@ async def mcp_asgi_app(scope, receive, send):
         return
 
     if scope["method"] == "GET":
-        # Handle SSE connection
-        async with sse_transport.connect_sse(scope, receive, send) as (read_stream, write_stream):
-            await mcp_server.run(
-                read_stream,
-                write_stream,
-                mcp_server.create_initialization_options(),
-            )
+        logger.info("Handling GET request - establishing SSE connection")
+        try:
+            async with sse_transport.connect_sse(scope, receive, send) as (read_stream, write_stream):
+                logger.info("SSE connection established, running MCP server")
+                await mcp_server.run(
+                    read_stream,
+                    write_stream,
+                    mcp_server.create_initialization_options(),
+                )
+                logger.info("MCP server run completed")
+        except Exception as e:
+            logger.error(f"Error in GET handler: {e}", exc_info=True)
+            raise
+
     elif scope["method"] == "POST":
-        # Handle incoming messages
-        await sse_transport.handle_post_message(scope, receive, send)
+        logger.info("Handling POST request - processing message")
+        try:
+            # Read the body to log it
+            body_parts = []
+            while True:
+                message = await receive()
+                logger.debug(f"Received message: {message}")
+                if message["type"] == "http.request":
+                    body_parts.append(message.get("body", b""))
+                    if not message.get("more_body", False):
+                        break
+
+            full_body = b"".join(body_parts)
+            logger.info(f"POST body: {full_body[:500]}")  # First 500 bytes
+
+            # We need to create a new receive that replays the body
+            async def replay_receive():
+                yield {"type": "http.request", "body": full_body, "more_body": False}
+
+            replay_gen = replay_receive()
+            async def new_receive():
+                return await replay_gen.__anext__()
+
+            await sse_transport.handle_post_message(scope, new_receive, send)
+            logger.info("POST message handled")
+        except Exception as e:
+            logger.error(f"Error in POST handler: {e}", exc_info=True)
+            raise
     else:
+        logger.warning(f"Unsupported method: {scope['method']}")
         await send({
             "type": "http.response.start",
             "status": 405,
