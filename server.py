@@ -155,10 +155,9 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         return [TextContent(type="text", text=f"Error: {str(e)}")]
 
 
-# Starlette app for SSE transport
-logger.info("Initializing SseServerTransport with endpoint '/mcp'")
-sse_transport = SseServerTransport("/mcp")
-logger.info(f"Transport initialized: {sse_transport}")
+# Don't use SseServerTransport - it has complex session management
+# Instead, implement simple HTTP streaming directly
+logger.info("Creating MCP server handler")
 
 async def mcp_asgi_app(scope, receive, send):
     """Raw ASGI application for handling MCP connections."""
@@ -187,50 +186,112 @@ async def mcp_asgi_app(scope, receive, send):
         })
         return
 
-    if scope["method"] == "GET":
-        logger.info("Handling GET request - establishing SSE connection")
+    if scope["method"] == "POST":
+        logger.info("Handling POST request - direct message handling")
         try:
-            async with sse_transport.connect_sse(scope, receive, send) as (read_stream, write_stream):
-                logger.info("SSE connection established, running MCP server")
-                await mcp_server.run(
-                    read_stream,
-                    write_stream,
-                    mcp_server.create_initialization_options(),
-                )
-                logger.info("MCP server run completed")
-        except Exception as e:
-            logger.error(f"Error in GET handler: {e}", exc_info=True)
-            raise
-
-    elif scope["method"] == "POST":
-        logger.info("Handling POST request - processing message")
-        try:
-            # Read the body to log it
+            # Read the POST body
             body_parts = []
             while True:
                 message = await receive()
-                logger.debug(f"Received message: {message}")
                 if message["type"] == "http.request":
                     body_parts.append(message.get("body", b""))
                     if not message.get("more_body", False):
                         break
 
-            full_body = b"".join(body_parts)
-            logger.info(f"POST body: {full_body[:500]}")  # First 500 bytes
+            request_data = json.loads(b"".join(body_parts))
+            logger.info(f"Request: {request_data}")
 
-            # We need to create a new receive that replays the body
-            async def replay_receive():
-                yield {"type": "http.request", "body": full_body, "more_body": False}
+            # Import needed for JSON-RPC handling
+            from mcp.types import JSONRPCRequest, JSONRPCResponse, JSONRPCError
 
-            replay_gen = replay_receive()
-            async def new_receive():
-                return await replay_gen.__anext__()
+            # Handle the JSON-RPC request
+            if request_data.get("method") == "initialize":
+                response = {
+                    "jsonrpc": "2.0",
+                    "id": request_data["id"],
+                    "result": {
+                        "protocolVersion": "2025-06-18",
+                        "capabilities": {
+                            "tools": {}
+                        },
+                        "serverInfo": {
+                            "name": "microsoft-graph-mcp",
+                            "version": "1.0.0"
+                        }
+                    }
+                }
+            elif request_data.get("method") == "tools/list":
+                tools = await list_tools()
+                response = {
+                    "jsonrpc": "2.0",
+                    "id": request_data["id"],
+                    "result": {
+                        "tools": [
+                            {
+                                "name": tool.name,
+                                "description": tool.description,
+                                "inputSchema": tool.inputSchema
+                            }
+                            for tool in tools
+                        ]
+                    }
+                }
+            elif request_data.get("method") == "tools/call":
+                tool_name = request_data["params"]["name"]
+                arguments = request_data["params"].get("arguments", {})
+                result = await call_tool(tool_name, arguments)
+                response = {
+                    "jsonrpc": "2.0",
+                    "id": request_data["id"],
+                    "result": {
+                        "content": [{"type": r.type, "text": r.text} for r in result]
+                    }
+                }
+            else:
+                response = {
+                    "jsonrpc": "2.0",
+                    "id": request_data.get("id"),
+                    "error": {
+                        "code": -32601,
+                        "message": f"Method not found: {request_data.get('method')}"
+                    }
+                }
 
-            await sse_transport.handle_post_message(scope, new_receive, send)
-            logger.info("POST message handled")
+            response_body = json.dumps(response).encode()
+            logger.info(f"Response: {response}")
+
+            await send({
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [
+                    [b"content-type", b"application/json"],
+                    [b"content-length", str(len(response_body)).encode()],
+                ],
+            })
+            await send({
+                "type": "http.response.body",
+                "body": response_body,
+            })
         except Exception as e:
             logger.error(f"Error in POST handler: {e}", exc_info=True)
-            raise
+            error_response = {
+                "jsonrpc": "2.0",
+                "id": None,
+                "error": {
+                    "code": -32603,
+                    "message": str(e)
+                }
+            }
+            error_body = json.dumps(error_response).encode()
+            await send({
+                "type": "http.response.start",
+                "status": 500,
+                "headers": [[b"content-type", b"application/json"]],
+            })
+            await send({
+                "type": "http.response.body",
+                "body": error_body,
+            })
     else:
         logger.warning(f"Unsupported method: {scope['method']}")
         await send({
