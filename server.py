@@ -8,10 +8,7 @@ from dotenv import load_dotenv
 from mcp.server import Server
 from mcp.server.sse import SseServerTransport
 from mcp.types import Tool, TextContent
-from starlette.applications import Starlette
-from starlette.routing import Route, Mount
 from starlette.middleware.cors import CORSMiddleware
-from starlette.responses import Response
 from msgraph import GraphServiceClient
 from azure.identity import ClientSecretCredential
 
@@ -153,37 +150,49 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
 # Starlette app for SSE transport
 sse_transport = SseServerTransport("/mcp")
 
-class MCPHandler:
-    """ASGI application for handling MCP connections."""
+async def mcp_asgi_app(scope, receive, send):
+    """Raw ASGI application for handling MCP connections."""
+    if scope["type"] != "http":
+        return
 
-    async def __call__(self, scope, receive, send):
-        if scope["type"] != "http":
-            return
+    # Only handle /mcp path
+    if scope["path"] != "/mcp":
+        await send({
+            "type": "http.response.start",
+            "status": 404,
+            "headers": [[b"content-type", b"text/plain"]],
+        })
+        await send({
+            "type": "http.response.body",
+            "body": b"Not Found",
+        })
+        return
 
-        if scope["method"] == "GET":
-            # Handle SSE connection
-            async with sse_transport.connect_sse(scope, receive, send) as (read_stream, write_stream):
-                await mcp_server.run(
-                    read_stream,
-                    write_stream,
-                    mcp_server.create_initialization_options(),
-                )
-        elif scope["method"] == "POST":
-            # Handle incoming messages
-            await sse_transport.handle_post_message(scope, receive, send)
+    if scope["method"] == "GET":
+        # Handle SSE connection
+        async with sse_transport.connect_sse(scope, receive, send) as (read_stream, write_stream):
+            await mcp_server.run(
+                read_stream,
+                write_stream,
+                mcp_server.create_initialization_options(),
+            )
+    elif scope["method"] == "POST":
+        # Handle incoming messages
+        await sse_transport.handle_post_message(scope, receive, send)
+    else:
+        await send({
+            "type": "http.response.start",
+            "status": 405,
+            "headers": [[b"content-type", b"text/plain"]],
+        })
+        await send({
+            "type": "http.response.body",
+            "body": b"Method Not Allowed",
+        })
 
-mcp_handler = MCPHandler()
-
-app = Starlette(
-    debug=True,
-    routes=[
-        Mount("/mcp", app=mcp_handler),
-    ],
-)
-
-# Add CORS middleware
-app.add_middleware(
-    CORSMiddleware,
+# Wrap with CORS middleware
+app = CORSMiddleware(
+    mcp_asgi_app,
     allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
