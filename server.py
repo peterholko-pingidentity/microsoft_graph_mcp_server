@@ -9,7 +9,7 @@ from mcp.server import Server
 from mcp.server.sse import SseServerTransport
 from mcp.types import Tool, TextContent
 from starlette.applications import Starlette
-from starlette.routing import Route
+from starlette.routing import Route, Mount
 from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import Response
 from msgraph import GraphServiceClient
@@ -153,25 +153,31 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
 # Starlette app for SSE transport
 sse_transport = SseServerTransport("/mcp")
 
-async def handle_mcp_sse(scope, receive, send):
-    """Handle SSE connection for MCP protocol."""
-    async with sse_transport.connect_sse(scope, receive, send) as (read_stream, write_stream):
-        await mcp_server.run(
-            read_stream,
-            write_stream,
-            mcp_server.create_initialization_options(),
-        )
+class MCPHandler:
+    """ASGI application for handling MCP connections."""
 
-async def handle_mcp_messages(scope, receive, send):
-    """Handle incoming MCP messages."""
-    await sse_transport.handle_post_message(scope, receive, send)
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return
 
+        if scope["method"] == "GET":
+            # Handle SSE connection
+            async with sse_transport.connect_sse(scope, receive, send) as (read_stream, write_stream):
+                await mcp_server.run(
+                    read_stream,
+                    write_stream,
+                    mcp_server.create_initialization_options(),
+                )
+        elif scope["method"] == "POST":
+            # Handle incoming messages
+            await sse_transport.handle_post_message(scope, receive, send)
+
+mcp_handler = MCPHandler()
 
 app = Starlette(
     debug=True,
     routes=[
-        Route("/mcp", endpoint=handle_mcp_sse, methods=["GET"]),
-        Route("/mcp", endpoint=handle_mcp_messages, methods=["POST"]),
+        Mount("/mcp", app=mcp_handler),
     ],
 )
 
