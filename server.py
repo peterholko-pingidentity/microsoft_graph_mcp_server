@@ -3,17 +3,22 @@
 
 import os
 import json
+import logging
 from typing import Any
 from dotenv import load_dotenv
 from mcp.server import Server
 from mcp.server.sse import SseServerTransport
 from mcp.types import Tool, TextContent
-from starlette.applications import Starlette
-from starlette.routing import Route
 from starlette.middleware.cors import CORSMiddleware
-from starlette.responses import Response
 from msgraph import GraphServiceClient
 from azure.identity import ClientSecretCredential
+
+# Configure logging
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -150,34 +155,158 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         return [TextContent(type="text", text=f"Error: {str(e)}")]
 
 
-# Starlette app for SSE transport
-sse_transport = SseServerTransport("/mcp")
+# Don't use SseServerTransport - it has complex session management
+# Instead, implement simple HTTP streaming directly
+logger.info("Creating MCP server handler")
 
-async def handle_mcp_sse(scope, receive, send):
-    """Handle SSE connection for MCP protocol."""
-    async with sse_transport.connect_sse(scope, receive, send) as (read_stream, write_stream):
-        await mcp_server.run(
-            read_stream,
-            write_stream,
-            mcp_server.create_initialization_options(),
-        )
+async def mcp_asgi_app(scope, receive, send):
+    """Raw ASGI application for handling MCP connections."""
+    logger.info(f"========== NEW REQUEST ==========")
+    logger.info(f"Request type: {scope.get('type')}")
+    logger.info(f"Request method: {scope.get('method')}")
+    logger.info(f"Request path: {scope.get('path')}")
+    logger.info(f"Query string: {scope.get('query_string', b'').decode()}")
+    logger.info(f"Headers: {dict(scope.get('headers', []))}")
 
-async def handle_mcp_messages(scope, receive, send):
-    """Handle incoming MCP messages."""
-    await sse_transport.handle_post_message(scope, receive, send)
+    if scope["type"] != "http":
+        logger.warning(f"Non-HTTP request type: {scope['type']}")
+        return
 
+    # Only handle /mcp path
+    if scope["path"] != "/mcp":
+        logger.warning(f"Path mismatch: {scope['path']} != /mcp")
+        await send({
+            "type": "http.response.start",
+            "status": 404,
+            "headers": [[b"content-type", b"text/plain"]],
+        })
+        await send({
+            "type": "http.response.body",
+            "body": b"Not Found",
+        })
+        return
 
-app = Starlette(
-    debug=True,
-    routes=[
-        Route("/mcp", endpoint=handle_mcp_sse, methods=["GET"]),
-        Route("/mcp", endpoint=handle_mcp_messages, methods=["POST"]),
-    ],
-)
+    if scope["method"] == "POST":
+        logger.info("Handling POST request - direct message handling")
+        try:
+            # Read the POST body
+            body_parts = []
+            while True:
+                message = await receive()
+                if message["type"] == "http.request":
+                    body_parts.append(message.get("body", b""))
+                    if not message.get("more_body", False):
+                        break
 
-# Add CORS middleware
-app.add_middleware(
-    CORSMiddleware,
+            request_data = json.loads(b"".join(body_parts))
+            logger.info(f"Request: {request_data}")
+
+            # Import needed for JSON-RPC handling
+            from mcp.types import JSONRPCRequest, JSONRPCResponse, JSONRPCError
+
+            # Handle the JSON-RPC request
+            if request_data.get("method") == "initialize":
+                response = {
+                    "jsonrpc": "2.0",
+                    "id": request_data["id"],
+                    "result": {
+                        "protocolVersion": "2025-06-18",
+                        "capabilities": {
+                            "tools": {}
+                        },
+                        "serverInfo": {
+                            "name": "microsoft-graph-mcp",
+                            "version": "1.0.0"
+                        }
+                    }
+                }
+            elif request_data.get("method") == "tools/list":
+                tools = await list_tools()
+                response = {
+                    "jsonrpc": "2.0",
+                    "id": request_data["id"],
+                    "result": {
+                        "tools": [
+                            {
+                                "name": tool.name,
+                                "description": tool.description,
+                                "inputSchema": tool.inputSchema
+                            }
+                            for tool in tools
+                        ]
+                    }
+                }
+            elif request_data.get("method") == "tools/call":
+                tool_name = request_data["params"]["name"]
+                arguments = request_data["params"].get("arguments", {})
+                result = await call_tool(tool_name, arguments)
+                response = {
+                    "jsonrpc": "2.0",
+                    "id": request_data["id"],
+                    "result": {
+                        "content": [{"type": r.type, "text": r.text} for r in result]
+                    }
+                }
+            else:
+                response = {
+                    "jsonrpc": "2.0",
+                    "id": request_data.get("id"),
+                    "error": {
+                        "code": -32601,
+                        "message": f"Method not found: {request_data.get('method')}"
+                    }
+                }
+
+            response_body = json.dumps(response).encode()
+            logger.info(f"Response: {response}")
+
+            await send({
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [
+                    [b"content-type", b"application/json"],
+                    [b"content-length", str(len(response_body)).encode()],
+                ],
+            })
+            await send({
+                "type": "http.response.body",
+                "body": response_body,
+            })
+        except Exception as e:
+            logger.error(f"Error in POST handler: {e}", exc_info=True)
+            error_response = {
+                "jsonrpc": "2.0",
+                "id": None,
+                "error": {
+                    "code": -32603,
+                    "message": str(e)
+                }
+            }
+            error_body = json.dumps(error_response).encode()
+            await send({
+                "type": "http.response.start",
+                "status": 500,
+                "headers": [[b"content-type", b"application/json"]],
+            })
+            await send({
+                "type": "http.response.body",
+                "body": error_body,
+            })
+    else:
+        logger.warning(f"Unsupported method: {scope['method']}")
+        await send({
+            "type": "http.response.start",
+            "status": 405,
+            "headers": [[b"content-type", b"text/plain"]],
+        })
+        await send({
+            "type": "http.response.body",
+            "body": b"Method Not Allowed",
+        })
+
+# Wrap with CORS middleware
+app = CORSMiddleware(
+    mcp_asgi_app,
     allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
