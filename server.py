@@ -10,6 +10,7 @@ from mcp.server.sse import SseServerTransport
 from mcp.types import Tool, TextContent
 from starlette.applications import Starlette
 from starlette.routing import Route
+from starlette.middleware.cors import CORSMiddleware
 from msgraph import GraphServiceClient
 from azure.identity import ClientSecretCredential
 
@@ -171,6 +172,15 @@ app = Starlette(
         Route("/mcp", endpoint=handle_sse),
         Route("/messages", endpoint=handle_messages, methods=["POST"]),
     ],
+)
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
