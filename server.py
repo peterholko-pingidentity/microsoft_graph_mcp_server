@@ -162,9 +162,9 @@ async def handle_mcp_sse(scope, receive, send):
             mcp_server.create_initialization_options(),
         )
 
-async def handle_mcp_messages(request):
+async def handle_mcp_messages(scope, receive, send):
     """Handle incoming MCP messages."""
-    return await sse_transport.handle_post_message(request)
+    await sse_transport.handle_post_message(scope, receive, send)
 
 
 app = Starlette(
