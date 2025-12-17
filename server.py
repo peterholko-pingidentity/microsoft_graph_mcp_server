@@ -11,6 +11,7 @@ from mcp.types import Tool, TextContent
 from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.middleware.cors import CORSMiddleware
+from starlette.responses import Response
 from msgraph import GraphServiceClient
 from azure.identity import ClientSecretCredential
 
@@ -150,23 +151,27 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
 
 
 # Starlette app for SSE transport
-async def handle_mcp(request):
-    """Handle MCP connections - both SSE (GET) and messages (POST)."""
-    async with SseServerTransport("/mcp") as transport:
-        if request.method == "POST":
-            await transport.handle_post_message(request)
-        else:
-            await mcp_server.run(
-                transport.read_stream,
-                transport.write_stream,
-                mcp_server.create_initialization_options(),
-            )
+sse_transport = SseServerTransport("/mcp")
+
+async def handle_mcp_sse(scope, receive, send):
+    """Handle SSE connection for MCP protocol."""
+    async with sse_transport.connect_sse(scope, receive, send) as (read_stream, write_stream):
+        await mcp_server.run(
+            read_stream,
+            write_stream,
+            mcp_server.create_initialization_options(),
+        )
+
+async def handle_mcp_messages(request):
+    """Handle incoming MCP messages."""
+    return await sse_transport.handle_post_message(request)
 
 
 app = Starlette(
     debug=True,
     routes=[
-        Route("/mcp", endpoint=handle_mcp, methods=["GET", "POST"]),
+        Route("/mcp", endpoint=handle_mcp_sse, methods=["GET"]),
+        Route("/mcp", endpoint=handle_mcp_messages, methods=["POST"]),
     ],
 )
 
