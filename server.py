@@ -152,7 +152,16 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
     except Exception as e:
-        return [TextContent(type="text", text=f"Error: {str(e)}")]
+        # Parse Microsoft Graph API errors for better messages
+        error_msg = str(e)
+        if "Request_ResourceNotFound" in error_msg:
+            return [TextContent(type="text", text=f"Error: User '{arguments.get('userId', 'unknown')}' not found in Azure AD. Please verify the user ID or userPrincipalName.")]
+        elif "Request_BadRequest" in error_msg:
+            return [TextContent(type="text", text=f"Error: Invalid request. Please check the parameters: {error_msg}")]
+        elif "Authorization_RequestDenied" in error_msg or "Forbidden" in error_msg:
+            return [TextContent(type="text", text=f"Error: Permission denied. Ensure the app has the required Graph API permissions (User.ReadWrite.All).")]
+        else:
+            return [TextContent(type="text", text=f"Error: {error_msg}")]
 
 
 # Don't use SseServerTransport - it has complex session management
