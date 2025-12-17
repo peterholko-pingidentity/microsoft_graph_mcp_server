@@ -168,7 +168,7 @@ async def handle_messages(request):
 app = Starlette(
     debug=True,
     routes=[
-        Route("/sse", endpoint=handle_sse),
+        Route("/mcp", endpoint=handle_sse),
         Route("/messages", endpoint=handle_messages, methods=["POST"]),
     ],
 )

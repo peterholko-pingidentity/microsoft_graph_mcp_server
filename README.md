@@ -54,7 +54,7 @@ PORT=8000
 python server.py
 ```
 
-The server will start on `http://localhost:8000` with SSE endpoint at `/sse`.
+The server will start on `http://localhost:8000` with MCP endpoint at `/mcp`.
 
 ## Azure AD Setup
 
@@ -140,7 +140,7 @@ Delete a user.
 This server implements the Remote MCP protocol and can be connected to Amazon Bedrock agents:
 
 1. Deploy this server to a publicly accessible endpoint (AWS ECS, EC2, Lambda, etc.)
-2. Configure your Bedrock agent with the server's SSE endpoint URL
+2. Configure your Bedrock agent with the server's MCP endpoint URL: `https://your-domain.com/mcp`
 3. The agent can now call the Microsoft Graph tools
 
 ## Architecture
