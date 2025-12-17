@@ -150,27 +150,23 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
 
 
 # Starlette app for SSE transport
-async def handle_sse(request):
-    """Handle SSE connections for remote MCP protocol."""
-    async with SseServerTransport("/messages") as transport:
-        await mcp_server.run(
-            transport.read_stream,
-            transport.write_stream,
-            mcp_server.create_initialization_options(),
-        )
-
-
-async def handle_messages(request):
-    """Handle message POST requests."""
-    async with SseServerTransport("/messages") as transport:
-        await transport.handle_post_message(request)
+async def handle_mcp(request):
+    """Handle MCP connections - both SSE (GET) and messages (POST)."""
+    async with SseServerTransport("/mcp") as transport:
+        if request.method == "POST":
+            await transport.handle_post_message(request)
+        else:
+            await mcp_server.run(
+                transport.read_stream,
+                transport.write_stream,
+                mcp_server.create_initialization_options(),
+            )
 
 
 app = Starlette(
     debug=True,
     routes=[
-        Route("/mcp", endpoint=handle_sse),
-        Route("/messages", endpoint=handle_messages, methods=["POST"]),
+        Route("/mcp", endpoint=handle_mcp, methods=["GET", "POST"]),
     ],
 )
 
