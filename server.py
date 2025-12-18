@@ -171,12 +171,26 @@ logger.info("Creating MCP server handler")
 
 async def mcp_asgi_app(scope, receive, send):
     """Raw ASGI application for handling MCP connections."""
+    logger.info("="*80)
     logger.info(f"========== NEW REQUEST ==========")
+    logger.info("="*80)
     logger.info(f"Request type: {scope.get('type')}")
     logger.info(f"Request method: {scope.get('method')}")
     logger.info(f"Request path: {scope.get('path')}")
     logger.info(f"Query string: {scope.get('query_string', b'').decode()}")
-    logger.info(f"Headers: {dict(scope.get('headers', []))}")
+    logger.info(f"Client: {scope.get('client')}")
+    logger.info(f"Scheme: {scope.get('scheme')}")
+    logger.info(f"Server: {scope.get('server')}")
+
+    # Parse and log headers nicely
+    headers_dict = {}
+    for key, value in scope.get('headers', []):
+        headers_dict[key.decode()] = value.decode()
+    logger.info("Headers:")
+    for k, v in headers_dict.items():
+        logger.info(f"  {k}: {v}")
+
+    logger.info("="*80)
 
     if scope["type"] != "http":
         logger.warning(f"Non-HTTP request type: {scope['type']}")
@@ -197,13 +211,14 @@ async def mcp_asgi_app(scope, receive, send):
         return
 
     if scope["method"] == "GET":
-        logger.info("Handling GET request - establishing SSE connection")
+        logger.info(">>> Handling GET request - establishing SSE connection")
         # For SSE clients, establish a server-sent events stream
         import uuid
         session_id = str(uuid.uuid4())
-        logger.info(f"Created session: {session_id}")
+        logger.info(f">>> Created session: {session_id}")
 
         # Send SSE headers
+        logger.info(">>> Sending SSE response headers")
         await send({
             "type": "http.response.start",
             "status": 200,
@@ -213,30 +228,38 @@ async def mcp_asgi_app(scope, receive, send):
                 [b"connection", b"keep-alive"],
             ],
         })
+        logger.info(">>> SSE headers sent successfully")
 
         # Send the endpoint event with session_id
         endpoint_event = f"event: endpoint\ndata: /mcp?session_id={session_id}\n\n"
+        logger.info(f">>> Sending endpoint event: {endpoint_event.strip()}")
         await send({
             "type": "http.response.body",
             "body": endpoint_event.encode(),
             "more_body": True,
         })
+        logger.info(">>> Endpoint event sent successfully")
 
-        logger.info(f"SSE connection established with session {session_id}")
+        logger.info(f">>> SSE connection fully established with session {session_id}")
+        logger.info(f">>> Client should now POST to: /mcp?session_id={session_id}")
 
         # Keep connection alive - wait for disconnect
         try:
+            message_count = 0
             while True:
                 message = await receive()
+                message_count += 1
+                logger.debug(f">>> SSE session {session_id}: received message #{message_count}: {message}")
+
                 if message["type"] == "http.disconnect":
-                    logger.info(f"Session {session_id} disconnected")
+                    logger.info(f">>> Session {session_id} DISCONNECTED after {message_count} messages")
                     break
                 await asyncio.sleep(1)
         except Exception as e:
-            logger.error(f"SSE connection error: {e}", exc_info=True)
+            logger.error(f">>> SSE connection error for session {session_id}: {e}", exc_info=True)
 
     elif scope["method"] == "POST":
-        logger.info("Handling POST request - direct message handling")
+        logger.info("<<< Handling POST request - direct message handling")
 
         # Check for session_id in query string (for SSE clients)
         query_string = scope.get("query_string", b"").decode()
@@ -245,26 +268,44 @@ async def mcp_asgi_app(scope, receive, send):
             from urllib.parse import parse_qs
             params = parse_qs(query_string)
             session_id = params.get("session_id", [None])[0]
-            logger.info(f"POST with session_id: {session_id}")
+            logger.info(f"<<< POST with session_id: {session_id}")
+        else:
+            logger.info("<<< POST without session_id (direct client)")
 
         try:
             # Read the POST body
+            logger.info("<<< Reading POST body...")
             body_parts = []
+            chunk_count = 0
             while True:
                 message = await receive()
+                chunk_count += 1
+                logger.debug(f"<<< Received chunk #{chunk_count}: {message}")
+
                 if message["type"] == "http.request":
                     body_parts.append(message.get("body", b""))
                     if not message.get("more_body", False):
+                        logger.info(f"<<< Body complete after {chunk_count} chunks")
                         break
 
-            request_data = json.loads(b"".join(body_parts))
-            logger.info(f"Request: {request_data}")
+            full_body = b"".join(body_parts)
+            logger.info(f"<<< Total body size: {len(full_body)} bytes")
+            logger.info(f"<<< Body preview: {full_body[:200]}")
+
+            request_data = json.loads(full_body)
+            logger.info(f"<<< Parsed JSON-RPC request:")
+            logger.info(f"<<<   Method: {request_data.get('method')}")
+            logger.info(f"<<<   ID: {request_data.get('id')}")
+            logger.info(f"<<<   Params: {request_data.get('params', {})}")
 
             # Import needed for JSON-RPC handling
             from mcp.types import JSONRPCRequest, JSONRPCResponse, JSONRPCError
 
             # Handle the JSON-RPC request
+            logger.info(f"<<< Processing method: {request_data.get('method')}")
+
             if request_data.get("method") == "initialize":
+                logger.info("<<< Handling 'initialize' request")
                 response = {
                     "jsonrpc": "2.0",
                     "id": request_data["id"],
@@ -279,8 +320,12 @@ async def mcp_asgi_app(scope, receive, send):
                         }
                     }
                 }
+                logger.info("<<< Initialize response prepared")
+
             elif request_data.get("method") == "tools/list":
+                logger.info("<<< Handling 'tools/list' request")
                 tools = await list_tools()
+                logger.info(f"<<< Found {len(tools)} tools")
                 response = {
                     "jsonrpc": "2.0",
                     "id": request_data["id"],
@@ -295,10 +340,17 @@ async def mcp_asgi_app(scope, receive, send):
                         ]
                     }
                 }
+                logger.info(f"<<< Tools list response prepared with tools: {[t.name for t in tools]}")
+
             elif request_data.get("method") == "tools/call":
                 tool_name = request_data["params"]["name"]
                 arguments = request_data["params"].get("arguments", {})
+                logger.info(f"<<< Handling 'tools/call' request for tool: {tool_name}")
+                logger.info(f"<<< Tool arguments: {arguments}")
+
                 result = await call_tool(tool_name, arguments)
+                logger.info(f"<<< Tool execution completed, result: {result}")
+
                 response = {
                     "jsonrpc": "2.0",
                     "id": request_data["id"],
@@ -306,7 +358,10 @@ async def mcp_asgi_app(scope, receive, send):
                         "content": [{"type": r.type, "text": r.text} for r in result]
                     }
                 }
+                logger.info("<<< Tool call response prepared")
+
             else:
+                logger.warning(f"<<< Unknown method: {request_data.get('method')}")
                 response = {
                     "jsonrpc": "2.0",
                     "id": request_data.get("id"),
@@ -317,8 +372,10 @@ async def mcp_asgi_app(scope, receive, send):
                 }
 
             response_body = json.dumps(response).encode()
-            logger.info(f"Response: {response}")
+            logger.info(f"<<< Response body size: {len(response_body)} bytes")
+            logger.info(f"<<< Response preview: {response_body[:300]}")
 
+            logger.info("<<< Sending HTTP 200 response...")
             await send({
                 "type": "http.response.start",
                 "status": 200,
@@ -327,30 +384,44 @@ async def mcp_asgi_app(scope, receive, send):
                     [b"content-length", str(len(response_body)).encode()],
                 ],
             })
+            logger.info("<<< Response headers sent")
+
             await send({
                 "type": "http.response.body",
                 "body": response_body,
             })
+            logger.info("<<< Response body sent - REQUEST COMPLETE")
+            logger.info("="*80)
+
         except Exception as e:
-            logger.error(f"Error in POST handler: {e}", exc_info=True)
+            logger.error("="*80)
+            logger.error(f"<<< ERROR in POST handler: {e}", exc_info=True)
+            logger.error("="*80)
+
             error_response = {
                 "jsonrpc": "2.0",
-                "id": None,
+                "id": request_data.get("id") if 'request_data' in locals() else None,
                 "error": {
                     "code": -32603,
                     "message": str(e)
                 }
             }
             error_body = json.dumps(error_response).encode()
-            await send({
-                "type": "http.response.start",
-                "status": 500,
-                "headers": [[b"content-type", b"application/json"]],
-            })
-            await send({
-                "type": "http.response.body",
-                "body": error_body,
-            })
+            logger.error(f"<<< Sending error response: {error_body[:200]}")
+
+            try:
+                await send({
+                    "type": "http.response.start",
+                    "status": 500,
+                    "headers": [[b"content-type", b"application/json"]],
+                })
+                await send({
+                    "type": "http.response.body",
+                    "body": error_body,
+                })
+                logger.error("<<< Error response sent")
+            except Exception as send_error:
+                logger.error(f"<<< Failed to send error response: {send_error}", exc_info=True)
     else:
         logger.warning(f"Unsupported method: {scope['method']}")
         await send({
