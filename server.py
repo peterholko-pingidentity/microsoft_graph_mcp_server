@@ -195,7 +195,35 @@ async def mcp_asgi_app(scope, receive, send):
         })
         return
 
-    if scope["method"] == "POST":
+    if scope["method"] == "GET":
+        logger.info("Handling GET request - returning server info")
+        # Return server capabilities and info
+        info = {
+            "name": "microsoft-graph-mcp",
+            "version": "1.0.0",
+            "protocolVersion": "2025-06-18",
+            "capabilities": {
+                "tools": {}
+            },
+            "description": "Microsoft Graph MCP Server for Azure AD user management",
+            "transport": "http"
+        }
+        response_body = json.dumps(info, indent=2).encode()
+
+        await send({
+            "type": "http.response.start",
+            "status": 200,
+            "headers": [
+                [b"content-type", b"application/json"],
+                [b"content-length", str(len(response_body)).encode()],
+            ],
+        })
+        await send({
+            "type": "http.response.body",
+            "body": response_body,
+        })
+
+    elif scope["method"] == "POST":
         logger.info("Handling POST request - direct message handling")
         try:
             # Read the POST body
