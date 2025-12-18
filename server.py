@@ -4,6 +4,7 @@
 import os
 import json
 import logging
+import asyncio
 from typing import Any
 from dotenv import load_dotenv
 from mcp.server import Server
@@ -196,35 +197,56 @@ async def mcp_asgi_app(scope, receive, send):
         return
 
     if scope["method"] == "GET":
-        logger.info("Handling GET request - returning server info")
-        # Return server capabilities and info
-        info = {
-            "name": "microsoft-graph-mcp",
-            "version": "1.0.0",
-            "protocolVersion": "2025-06-18",
-            "capabilities": {
-                "tools": {}
-            },
-            "description": "Microsoft Graph MCP Server for Azure AD user management",
-            "transport": "http"
-        }
-        response_body = json.dumps(info, indent=2).encode()
+        logger.info("Handling GET request - establishing SSE connection")
+        # For SSE clients, establish a server-sent events stream
+        import uuid
+        session_id = str(uuid.uuid4())
+        logger.info(f"Created session: {session_id}")
 
+        # Send SSE headers
         await send({
             "type": "http.response.start",
             "status": 200,
             "headers": [
-                [b"content-type", b"application/json"],
-                [b"content-length", str(len(response_body)).encode()],
+                [b"content-type", b"text/event-stream"],
+                [b"cache-control", b"no-cache"],
+                [b"connection", b"keep-alive"],
             ],
         })
+
+        # Send the endpoint event with session_id
+        endpoint_event = f"event: endpoint\ndata: /mcp?session_id={session_id}\n\n"
         await send({
             "type": "http.response.body",
-            "body": response_body,
+            "body": endpoint_event.encode(),
+            "more_body": True,
         })
+
+        logger.info(f"SSE connection established with session {session_id}")
+
+        # Keep connection alive - wait for disconnect
+        try:
+            while True:
+                message = await receive()
+                if message["type"] == "http.disconnect":
+                    logger.info(f"Session {session_id} disconnected")
+                    break
+                await asyncio.sleep(1)
+        except Exception as e:
+            logger.error(f"SSE connection error: {e}", exc_info=True)
 
     elif scope["method"] == "POST":
         logger.info("Handling POST request - direct message handling")
+
+        # Check for session_id in query string (for SSE clients)
+        query_string = scope.get("query_string", b"").decode()
+        session_id = None
+        if query_string:
+            from urllib.parse import parse_qs
+            params = parse_qs(query_string)
+            session_id = params.get("session_id", [None])[0]
+            logger.info(f"POST with session_id: {session_id}")
+
         try:
             # Read the POST body
             body_parts = []
