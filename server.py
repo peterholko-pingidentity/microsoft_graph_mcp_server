@@ -90,6 +90,16 @@ async def list_tools() -> list[Tool]:
                 "required": ["userId"],
             },
         ),
+        Tool(
+          name="list_users",
+          description="List users in the Azure AD tenant",
+          inputSchema={
+            "type": "object",
+            "properties": {
+                "top": {"type": "integer", "description": "Number of users to return (default 10, max 999)", "default": 10},
+            },
+          },
+        ),
     ]
 
 
@@ -148,6 +158,30 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         elif name == "delete_user":
             await graph_client.users.by_user_id(arguments["userId"]).delete()
             return [TextContent(type="text", text=f"User {arguments['userId']} deleted successfully")]
+        
+        elif name == "list_users":
+            # Get the 'top' parameter, default to 10 if not provided
+            top_count = arguments.get("top", 10)
+    
+            # Request users from Graph
+            users_page = await graph_client.users.get(
+                request_configuration=lambda config: config.query_parameters.top = top_count
+            )
+    
+            user_list = []
+            if users_page and users_page.value:
+                for user in users_page.value:
+                    user_list.append({
+                        "id": user.id,
+                        "userPrincipalName": user.user_principal_name,
+                        "displayName": user.display_name,
+                        "mail": user.mail
+                    })
+
+            return [TextContent(
+                type="text", 
+                text=json.dumps({"users": user_list, "count": len(user_list)}, indent=2)
+            )]
 
         else:
             return [TextContent(type="text", text=f"Unknown tool: {name}")]
