@@ -163,9 +163,13 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             # Get the 'top' parameter, default to 10 if not provided
             top_count = arguments.get("top", 10)
     
-            # Request users from Graph
+            # 1. Define a local function to handle the configuration
+            def configure_query(config):
+                config.query_parameters.top = top_count
+    
+            # 2. Pass that function to the request
             users_page = await graph_client.users.get(
-                request_configuration=lambda config: config.query_parameters.top = top_count
+                request_configuration=configure_query
             )
     
             user_list = []
